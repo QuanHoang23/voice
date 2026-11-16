@@ -1,0 +1,135 @@
+# Build VoiceStudio cho Mac — chạy trong kho PHÁT HÀNH công khai (QuanHoang23/voice) để dùng máy Mac miễn phí
+# của GitHub; mã nguồn lấy từ kho riêng QuanHoang23/voicestudio-src bằng khoá chỉ-đọc (secret SRC_DEPLOY_KEY).
+# Bản gốc của file này nằm trong kho mã nguồn: release/kho_phat_hanh/.github/workflows/build-mac.yml
+#
+# - Đăng một Release (vd. v1.7) như bình thường → tự build bản Mac chip Apple + Intel từ tag v1.7 của kho mã
+#   nguồn, đính .dmg/.zip vào release đó và ghép gói Mac vào latest.json (để bản Mac tự cập nhật).
+# - Chạy tay (Actions > Build Mac > Run workflow): để trống tag = chỉ build thử từ nhánh main của kho mã nguồn,
+#   tải file ở mục Artifacts.
+# Nhật ký ở đây ai cũng xem được: không in mã nguồn ra log.
+name: Build Mac
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag release để gắn bản Mac (vd. v1.7). Để trống = chỉ build thử"
+        required: false
+        default: ""
+      src_ref:
+        description: "Nhánh/tag của kho mã nguồn khi build thử"
+        required: false
+        default: "main"
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+  SRC_REPO: QuanHoang23/voicestudio-src
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # chip Apple (arm64)
+            arch: arm64
+          - os: macos-15-intel    # chip Intel (x64)
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Lấy mã nguồn (kho riêng)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.TAG || github.event.inputs.src_ref || 'main' }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cài môi trường
+        run: PYTHON="$(which python)" bash CaiDat_mac.sh
+
+      - name: Nhớ tài nguyên giọng nói giữa các lần build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vsdata/models
+          key: vieneu-models-v1
+
+      - name: Thử đọc một câu (chạy từ mã nguồn)
+        env:
+          VOICESTUDIO_HOME: ${{ runner.temp }}/vsdata
+        run: |
+          .venv/bin/python desktop.py --selftest-tts > selftest_src.log 2>&1 || true
+          grep -E "selftest|infer ok|ui ok|SELFTEST|Error|error" selftest_src.log | tail -40
+          grep -q "SELFTEST OK" selftest_src.log
+
+      - name: Build VoiceStudio.app + .dmg + .zip
+        run: bash release/build_mac.sh
+
+      - name: Thử đọc một câu (bản đã đóng gói)
+        env:
+          VOICESTUDIO_HOME: ${{ runner.temp }}/vsdata
+        run: |
+          build/dist/VoiceStudio.app/Contents/MacOS/VoiceStudio --selftest-tts || true
+          LOG="$HOME/Library/Application Support/VoiceStudio/logs/voicestudio.log"
+          grep -E "selftest|infer ok|ui ok|SELFTEST|Error|error" "$LOG" | tail -40
+          grep -q "SELFTEST OK" "$LOG"
+
+      - name: Kiểm tra không lộ mã nguồn trong .app
+        run: |
+          RES=build/dist/VoiceStudio.app/Contents
+          LEAK=$(find "$RES" -maxdepth 3 \( -path "*/Resources/*.py" -o -path "*/Frameworks/*.py" \) \
+                 | grep -E "/(app|batch|desktop|hw|models_dl|gpu_pack|updater|rvc|rvc_pack|plat|vs_version)\.py$|/assets/.*\.py$" || true)
+          if [ -n "$LEAK" ]; then echo "Lộ mã nguồn: $LEAK"; exit 1; fi
+          echo "Không có mã nguồn VoiceStudio dạng chữ."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoiceStudio-mac-${{ matrix.arch }}
+          path: |
+            PhatHanh/*/VoiceStudio_*_mac-*.dmg
+            PhatHanh/*/VoiceStudio_*_mac-*.zip
+          if-no-files-found: error
+
+      - name: Đính vào Release ${{ env.TAG }}
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" PhatHanh/*/VoiceStudio_*_mac-*.dmg PhatHanh/*/VoiceStudio_*_mac-*.zip --clobber --repo "$GITHUB_REPOSITORY"
+
+  latest-json:
+    needs: build
+    if: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy mã nguồn (kho riêng)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.TAG }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: mac
+          merge-multiple: true
+      - name: Ghép gói Mac vào latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release download "$TAG" -p latest.json --repo "$GITHUB_REPOSITORY" -D rel; then
+            echo "Release $TAG không có latest.json (bản thử) → bỏ qua, chỉ đính file Mac."
+            exit 0
+          fi
+          python3 release/them_ban_mac.py rel/latest.json $(find mac -name 'VoiceStudio_*_mac-*.zip') --repo "$GITHUB_REPOSITORY"
+          cat rel/latest.json
+          gh release upload "$TAG" rel/latest.json --clobber --repo "$GITHUB_REPOSITORY"
