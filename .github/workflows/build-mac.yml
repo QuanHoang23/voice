@@ -127,7 +127,8 @@ jobs:
 
   latest-json:
     needs: build
-    if: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+    # Chạy cả khi chỉ một bản build qua (máy chip Apple của GitHub hay quá tải): ghép bản nào có thì ghép bản đó.
+    if: ${{ always() && (github.event.release.tag_name || github.event.inputs.tag) }}
     runs-on: ubuntu-latest
     steps:
       - name: Lấy mã nguồn (kho riêng)
@@ -138,6 +139,7 @@ jobs:
         run: bash -c "$CLONE_SCRIPT"
 
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: mac
           merge-multiple: true
@@ -146,6 +148,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ -z "$(find mac -name 'VoiceStudio_*_mac-*.zip' 2>/dev/null)" ]; then
+            echo "Không có bản Mac nào build qua → không đổi latest.json."
+            exit 0
+          fi
           if ! gh release download "$TAG" -p latest.json --repo "$GITHUB_REPOSITORY" -D rel; then
             echo "Release $TAG không có latest.json (bản thử) → bỏ qua, chỉ đính file Mac."
             exit 0
