@@ -29,6 +29,26 @@ permissions:
 env:
   TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
   SRC_REPO: QuanHoang23/voicestudio-src
+  # Lấy mã nguồn từ kho riêng bằng khoá trong secret (biến KEY) tại nhánh/tag REF.
+  # Khoá dán từ Windows có thể dính ký tự CR → bỏ đi. In dấu vân tay (không phải bí mật) để đối chiếu với
+  # deploy key trên kho mã nguồn.
+  CLONE_SCRIPT: |
+    set -e
+    mkdir -p ~/.ssh
+    printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/src_key
+    chmod 600 ~/.ssh/src_key
+    if ! ssh-keygen -y -f ~/.ssh/src_key > /dev/null; then
+      echo "::error::Secret SRC_DEPLOY_KEY không phải khoá riêng hợp lệ (dán thiếu dòng BEGIN/END, hoặc dán nhầm khoá công khai)."
+      exit 1
+    fi
+    echo "Dấu vân tay khoá trong secret: $(ssh-keygen -lf ~/.ssh/src_key | awk '{print $2}')"
+    export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/src_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    git clone --quiet --depth 1 --branch "$REF" "git@github.com:$SRC_REPO.git" src
+    rm -f ~/.ssh/src_key
+    shopt -s dotglob
+    mv src/* .
+    rmdir src
+    git log -1 --format="Mã nguồn: %h %s"
 
 jobs:
   build:
@@ -44,12 +64,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Lấy mã nguồn (kho riêng)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SRC_REPO }}
-          ref: ${{ env.TAG || github.event.inputs.src_ref || 'main' }}
-          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
-          persist-credentials: false
+        shell: bash
+        env:
+          KEY: ${{ secrets.SRC_DEPLOY_KEY }}
+          REF: ${{ env.TAG || github.event.inputs.src_ref || 'main' }}
+        run: bash -c "$CLONE_SCRIPT"
 
       - uses: actions/setup-python@v5
         with:
@@ -112,16 +131,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Lấy mã nguồn (kho riêng)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SRC_REPO }}
-          ref: ${{ env.TAG }}
-          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
-          persist-credentials: false
+        shell: bash
+        env:
+          KEY: ${{ secrets.SRC_DEPLOY_KEY }}
+          REF: ${{ env.TAG }}
+        run: bash -c "$CLONE_SCRIPT"
+
       - uses: actions/download-artifact@v4
         with:
           path: mac
           merge-multiple: true
+
       - name: Ghép gói Mac vào latest.json
         env:
           GH_TOKEN: ${{ github.token }}
